@@ -1,0 +1,140 @@
+services:
+  mongo:
+    image: mongo:7.0.5
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - ./mongo_data:/data/db
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh \"mongodb://$${MONGO_INITDB_ROOT_USERNAME}:$${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin\" --quiet --eval \"db.adminCommand('ping').ok\" | grep 1 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+## nvidia
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ./ollama_data:/root/.ollama
+  #   networks:
+  #     - ai-network
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: rocm
+  #             count: all
+  #             capabilities: [gpu]
+
+## amd rocm
+  # ollama:
+  #   image: ollama/ollama:rocm  # Use :rocm or :latest if it includes ROCm
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ./ollama_data:/root/.ollama
+  #   devices:
+  #     - /dev/kfd
+  #     - /dev/dri
+  #   networks:
+  #     - ai-network
+
+## vulkan
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ./ollama_data:/root/.ollama
+  #   environment:
+  #     - OLLAMA_VULKAN=1
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command: ["ollama serve & sleep 10 && ollama pull qwen3:8b && wait"]
+  #   networks:
+  #     - ai-network
+
+
+  app:
+    image: ghcr.io/danny-avila/librechat:latest
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      # ollama:
+      #   condition: service_started
+    environment:
+      MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ALLOW_REGISTRATION: "true"
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml
+    networks:
+      - ai-network
+
+  mcp-filesystem:
+    image: node:20-slim
+    restart: unless-stopped
+    volumes:
+      - ./documents:/data:ro  # замените на :rw, если хотите разрешить запись
+    networks:
+      - ai-network
+    command:
+      - sh
+      - -lc
+      - |
+          set -e
+          npx --yes supergateway@3.4.3 \
+            --port 8000 \
+            --outputTransport streamableHttp \
+            --stateful \
+            --sessionTimeout 600000 \
+            --streamableHttpPath /mcp \
+            --healthEndpoint /healthz \
+            --stdio "npx --yes @modelcontextprotocol/server-filesystem@2026.1.14 /data"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://localhost:8000/healthz', r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  langflow:
+    image: langflowai/langflow:latest
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      LANGFLOW_AUTO_LOGIN: "True"
+      LANGFLOW_CONFIG_DIR: /app/langflow
+      LANGFLOW_DATABASE_URL: sqlite:////app/langflow/langflow.db
+      LANGFLOW_COMPONENTS_PATH: /app/custom_components
+    volumes:
+      - ./langflow_data:/app/langflow
+      - ./custom_components:/app/custom_components
+      - ./documents:/data:ro
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7860/health_check').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  ai-network:
+    driver: bridge
