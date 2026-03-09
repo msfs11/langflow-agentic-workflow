@@ -211,4 +211,3 @@ ollama_data/*
 mongo_data/*
 langflow_data/*
 documents/*
-custom_components/*
